@@ -49,6 +49,3 @@ func query(i int) {
 
 MIT
 
-# Copyright
-
-Rémy Mathieu © 2016
