@@ -3,7 +3,6 @@ package waitgrouppool
 import (
     "context"
     "errors"
-    "fmt"
     "math"
     "sync"
     "time"
@@ -39,7 +38,6 @@ func WithTimeout(d time.Duration) Option {
 // New creates a WaitGroupPool.
 // The limit parameter is the maximum amount of
 // goroutines which can be started concurrently.
-// The 
 func New(limit int, opts ...Option) *WaitGroupPool {
     size := math.MaxInt32 // 2^32 - 1
     if limit > 0 {
@@ -101,9 +99,54 @@ func (s *WaitGroupPool) AddWithContext(ctx context.Context, delta int) (int, err
     for i := 0; i < delta; i++ {
         _, err := s.atomicAddWithContext(ctx)
         if err != nil {
-            return assigned, fmt.Errorf("%d are created, but failed to create all due to %s", assigned, err)
+            return assigned, err
         }
         assigned += 1
+    }
+
+    return delta, nil
+}
+
+func (s *WaitGroupPool) AddWithContextCocurrent(ctx context.Context, delta int) (int, error) {
+    if delta < 1 {
+        return 0, errors.New("You are trying to add a negative delta, which is not supported. Use Done instead")
+    }
+
+    errCh := make(chan error)
+    grCh := make(chan struct{}, delta)
+    complete := make(chan bool)
+
+    for i := 0; i < delta; i++ {
+        go func() {
+            _, err := s.atomicAddWithContext(ctx)
+            if err != nil {
+                errCh <- err
+                close(errCh)
+                return
+            } else {
+                grCh <- struct{}{}
+            }
+        }()
+    }
+
+    go func() {
+        for {
+            if len(grCh) == delta {
+                complete <- true
+                close(complete)
+                close(grCh)
+                return
+            }
+        }
+    }()
+
+    select {
+        case err := <- errCh:
+            return len(grCh), err
+        case <- ctx.Done():
+            return len(grCh), ctx.Err()
+        case <- complete:
+            return delta, nil 
     }
 
     return delta, nil
