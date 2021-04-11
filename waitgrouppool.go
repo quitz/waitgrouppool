@@ -9,41 +9,56 @@ import (
     "time"
 )
 
+const DEFAULT_ASSIGNMENT_TIMEOUT = time.Second * 60
+
 // WaitGroupPool has the same role and close to the
 // same API as the Golang sync.WaitGroup but adds a limit of
 // the amount of goroutines started concurrently.
 type WaitGroupPool struct {
     Size int
-
+    timeout time.Duration
     current chan struct{}
     wg      sync.WaitGroup
 }
 
+type Option func(wgp *WaitGroupPool)
+
+func WithSize(size int) Option {
+    return func(wgp *WaitGroupPool) {
+        wgp.Size = size
+    }
+}
+
+func WithTimeout(d time.Duration) Option {
+    return func(wgp *WaitGroupPool) {
+        wgp.timeout = d
+    }
+}
+
+
 // New creates a WaitGroupPool.
 // The limit parameter is the maximum amount of
 // goroutines which can be started concurrently.
-func New(limit int) WaitGroupPool {
+// The 
+func New(limit int, opts ...Option) *WaitGroupPool {
     size := math.MaxInt32 // 2^32 - 1
     if limit > 0 {
         size = limit
     }
-    return WaitGroupPool{
+    wgp := &WaitGroupPool{
         Size: size,
 
+        timeout: DEFAULT_ASSIGNMENT_TIMEOUT,
         current: make(chan struct{}, size),
         wg:      sync.WaitGroup{},
     }
-}
 
-// Add increments the internal WaitGroup counter.
-// It can be blocking if the limit of spawned goroutines
-// has been reached. It will stop blocking when Done is
-// been called.
-//
-// See sync.WaitGroup documentation for more information.
-// func (s *WaitGroupPool) Add() (int, error) {
-//     return s.AddWithContext(context.Background())
-// }
+    for _, opt := range opts {
+        opt(wgp)
+    }
+
+    return wgp
+}
 
 // Add adds delta to the internal WaitGroup counter.
 // It can be blocking if the limit of spawned goroutines
@@ -52,26 +67,16 @@ func New(limit int) WaitGroupPool {
 //
 // See sync.WaitGroup documentation for more information.
 func (s *WaitGroupPool) Add(delta int) (int, error) {
-    return s.AddWithContext(context.Background(), delta)
+    ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
+    defer cancel()
+
+    return s.AddWithContext(ctx, delta)
 }
 
-func (s *WaitGroupPool) AddWithContext(ctx context.Context, delta int) (int, error) {
-    if delta < 1 {
-        return 0, errors.New("You are trying to add a negative delta, which is not supported. Use Done instead")
-    }
-
-    assigned := 0
-    for i := 0; i < delta; i++ {
-        _, err := s.AtomicAddWithContext(ctx)
-        if err != nil {
-            return assigned, fmt.Errorf("%d are created, but failed to create all due to %s", assigned, err)
-        }
-        assigned += 1
-    }
-
-    return delta, nil
-}
-
+// Add adds delta to the internal WaitGroup counter along with the user-specified timeout window.
+// It can be blocking if the limit of spawned goroutines
+// has been reached. It will stop blocking when Done is
+// been called.
 func (s *WaitGroupPool) AddWithTimeout(delta int, timeout time.Duration) (int, error) {
     ctx, cancel := context.WithTimeout(context.Background(), timeout)
     defer cancel()
@@ -87,7 +92,24 @@ func (s *WaitGroupPool) AddWithTimeout(delta int, timeout time.Duration) (int, e
 // is acquired.
 //
 // See sync.WaitGroup documentation for more information.
-func (s *WaitGroupPool) AtomicAddWithContext(ctx context.Context) (int, error) {
+func (s *WaitGroupPool) AddWithContext(ctx context.Context, delta int) (int, error) {
+    if delta < 1 {
+        return 0, errors.New("You are trying to add a negative delta, which is not supported. Use Done instead")
+    }
+
+    assigned := 0
+    for i := 0; i < delta; i++ {
+        _, err := s.atomicAddWithContext(ctx)
+        if err != nil {
+            return assigned, fmt.Errorf("%d are created, but failed to create all due to %s", assigned, err)
+        }
+        assigned += 1
+    }
+
+    return delta, nil
+}
+
+func (s *WaitGroupPool) atomicAddWithContext(ctx context.Context) (int, error) {
     select {
     case <-ctx.Done():
         return 0, ctx.Err()
